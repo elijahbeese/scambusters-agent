@@ -44,6 +44,8 @@ from scripts.submission_packager import format_email_body
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "scambusters_v2_dev")
+from scripts.db import init_db
+init_db()
 
 # SSE progress queues per bounty
 progress_queues: dict[str, queue.Queue] = {}
