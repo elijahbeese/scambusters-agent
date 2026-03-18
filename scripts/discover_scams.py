@@ -1,15 +1,16 @@
 """
 Stage 1: discover_scams.py
 Scrapes HYIP monitoring sites to extract live crypto investment scam domains.
+Also supports URLScan tag search (task.tags:cryptoscam) per I4G docs.
 """
 
+import os
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import time
 import random
 
-# HYIP monitoring sites — all fraudulent, all useful
 HYIP_MONITORS = [
     "https://www.tophyip.biz/",
     "https://bestemoneys.com/hyips_1.html",
@@ -17,6 +18,8 @@ HYIP_MONITORS = [
     "https://hyipbanker.com/",
     "https://www.hothyips.com/",
 ]
+
+URLSCAN_TAG_SEARCH = "https://urlscan.io/api/v1/search/?q=task.tags:cryptoscam&size=100"
 
 HEADERS = {
     "User-Agent": (
@@ -26,59 +29,79 @@ HEADERS = {
     )
 }
 
+SKIP_DOMAINS = {
+    "google.com", "facebook.com", "twitter.com", "t.me",
+    "telegram.org", "youtube.com", "instagram.com", "linkedin.com",
+    "wikipedia.org", "github.com", "urlscan.io",
+}
 
-def extract_domains_from_monitor(url: str) -> list[str]:
-    """
-    Scrape a HYIP monitor page and extract external scam site domains.
-    Returns a list of base domains.
-    """
+
+def extract_domains_from_monitor(url: str) -> list:
     domains = []
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.text, "lxml")
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        soup = BeautifulSoup(r.text, "lxml")
+        monitor_netloc = urlparse(url).netloc
 
         for a in soup.find_all("a", href=True):
             href = a["href"]
             parsed = urlparse(href)
-
-            # We want external links that look like investment sites
-            if parsed.scheme in ("http", "https") and parsed.netloc:
-                monitor_domain = urlparse(url).netloc
-                link_domain = parsed.netloc.replace("www.", "")
-
-                # Skip links back to the monitor site itself
-                if monitor_domain in link_domain:
-                    continue
-
-                # Skip common non-scam domains
-                skip = ["google.", "facebook.", "twitter.", "t.me", "telegram."]
-                if any(s in link_domain for s in skip):
-                    continue
-
-                if link_domain and link_domain not in domains:
-                    domains.append(link_domain)
-
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                continue
+            domain = parsed.netloc.replace("www.", "").lower()
+            if domain == monitor_netloc.replace("www.", ""):
+                continue
+            if any(skip in domain for skip in SKIP_DOMAINS):
+                continue
+            if domain and domain not in domains:
+                domains.append(domain)
     except Exception as e:
-        print(f"      [!] Failed to scrape {url}: {e}")
-
+        print(f"      [!] Failed scraping {url}: {e}")
     return domains
 
 
-def discover_scam_domains(max_domains: int = 20) -> list[str]:
+def discover_from_urlscan_tags(api_key: str = None) -> list:
     """
-    Scrape all configured HYIP monitors and return a deduplicated
-    list of scam domains, capped at max_domains.
+    Query URLScan for domains tagged 'cryptoscam' per I4G methodology.
+    Returns list of domains.
     """
+    headers = {}
+    if api_key:
+        headers["API-Key"] = api_key
+    try:
+        r = requests.get(URLSCAN_TAG_SEARCH, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return []
+        results = r.json().get("results", [])
+        domains = []
+        for result in results:
+            page = result.get("page", {})
+            domain = page.get("domain", "")
+            if domain and domain not in domains:
+                domains.append(domain)
+        return domains
+    except Exception as e:
+        print(f"      [!] URLScan tag search failed: {e}")
+        return []
+
+
+def discover_scam_domains(max_domains: int = 20, urlscan_api_key: str = None) -> list:
     all_domains = []
 
+    # Method 1: HYIP monitors
     for monitor in HYIP_MONITORS:
         print(f"      Scraping: {monitor}")
         domains = extract_domains_from_monitor(monitor)
         all_domains.extend(domains)
-        # Be polite — don't hammer monitors
         time.sleep(random.uniform(1.5, 3.0))
 
-    # Deduplicate while preserving order
+    # Method 2: URLScan cryptoscam tag (per I4G docs)
+    if urlscan_api_key:
+        print("      Querying URLScan cryptoscam tag...")
+        tag_domains = discover_from_urlscan_tags(urlscan_api_key)
+        all_domains.extend(tag_domains)
+
+    # Deduplicate
     seen = set()
     unique = []
     for d in all_domains:
