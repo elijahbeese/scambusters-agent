@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Submission: {{ bounty.domain }} — ScamBusters{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Submission Package</h1>
+    <div class="page-subtitle">{{ bounty.domain }} · Ready for sam@intelligenceForGood.org</div>
+  </div>
+  <div style="display:flex; gap: 8px;">
+    <a href="/bounty/{{ bounty.bounty_id }}/report" class="btn btn-ghost">← Report</a>
+  </div>
+</div>
+
+{% if not package %}
+<div class="alert alert-warn">No submission package available. Complete the investigation first.</div>
+{% else %}
+
+<!-- Submission Stats -->
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-value highlight">{{ package.get('linked_domain_count', 0) }}</div>
+    <div class="stat-label">Linked Domains</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" style="color: var(--warn);">{{ package.get('wallet_count', 0) }}</div>
+    <div class="stat-label">Wallet Addresses</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" style="color: var(--purple);">
+      {{ package.get('social_channels', {}).values() | sum(start=[]) | list | length }}
+    </div>
+    <div class="stat-label">Social Channels</div>
+  </div>
+</div>
+
+<!-- Email Body -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Email to sam@intelligenceForGood.org</span>
+    <button class="btn btn-primary" onclick="copyEmail()">Copy Email</button>
+  </div>
+  <pre id="email-body">{{ email_body }}</pre>
+</div>
+
+<!-- Raw JSON Package -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Raw JSON Package</span>
+    <button class="btn btn-secondary" onclick="copyJSON()">Copy JSON</button>
+  </div>
+  <pre id="json-body">{{ package | tojson(indent=2) }}</pre>
+</div>
+
+<script>
+function copyEmail() {
+  navigator.clipboard.writeText(document.getElementById('email-body').textContent)
+    .then(() => alert('Email copied to clipboard'));
+}
+function copyJSON() {
+  navigator.clipboard.writeText(document.getElementById('json-body').textContent)
+    .then(() => alert('JSON copied to clipboard'));
+}
+</script>
+{% endif %}
+{% endblock %}
