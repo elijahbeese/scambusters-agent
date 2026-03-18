@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}New Bounty — ScamBusters Agent{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>New Bounty</h1>
+    <div class="page-subtitle">Paste the Discord bounty message below</div>
+  </div>
+  <a href="/" class="btn btn-ghost">← Back</a>
+</div>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Paste Discord Message</span>
+  </div>
+
+  <form method="POST" action="/intake">
+    <div class="form-group">
+      <label>Raw Discord Bounty Text</label>
+      <textarea name="raw_paste" rows="10" placeholder="🎯 New Bounty: example.com Information Intelligence For Good daily bounty.
+Get it before it expires!
+Sponsor Intelligence For Good
+Multiplier ×1.25
+Max Claims 1
+Expires in 17 hours • March 18, 2026 at 8:00 PM
+Target https://example.com/
+Bounty ID: 20260317_7e70bc8d882b4ac9a48307e4dd0ee75b">{{ raw or '' }}</textarea>
+    </div>
+
+    <div style="display: flex; gap: 10px; align-items: center;">
+      <button type="submit" class="btn btn-primary">Parse & Queue</button>
+      <span style="font-family: var(--mono); font-size: 11px; color: var(--muted)">
+        Agent will extract: domain, bounty ID, sponsor, multiplier, expiry
+      </span>
+    </div>
+  </form>
+</div>
+
+<!-- Expected format reference -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Expected Format</span>
+  </div>
+  <pre style="color: var(--muted)">🎯 New Bounty: <span style="color: var(--accent)">edx50.com</span> Information Intelligence For Good daily bounty.
+Sponsor <span style="color: var(--text)">Intelligence For Good</span>
+Multiplier <span style="color: var(--warn)">×1.25</span>
+Max Claims <span style="color: var(--text)">1</span>
+Expires in 17 hours • <span style="color: var(--text)">March 18, 2026 at 8:00 PM</span>
+Target <span style="color: var(--accent2)">https://edx50.com/</span>
+Bounty ID: <span style="color: var(--purple)">20260317_7e70bc8d882b4ac9a48307e4dd0ee75b</span></pre>
+  <div style="margin-top: 12px; font-family: var(--mono); font-size: 11px; color: var(--muted);">
+    The parser handles variations in formatting. At minimum it needs a target URL or domain.
+  </div>
+</div>
+{% endblock %}
