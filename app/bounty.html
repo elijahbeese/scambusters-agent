@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}{{ bounty.domain }} — ScamBusters{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>{{ bounty.domain }}</h1>
+    <div class="page-subtitle">
+      {{ bounty.bounty_id }} ·
+      <span class="badge badge-{{ bounty.status }}">{{ bounty.status }}</span>
+      {% if bounty.multiplier %} · <span style="color: var(--warn); font-family: var(--mono);">×{{ bounty.multiplier }}</span>{% endif %}
+    </div>
+  </div>
+  <div style="display: flex; gap: 8px;">
+    <a href="/" class="btn btn-ghost">← Board</a>
+    {% if bounty.status in ('complete', 'approved') %}
+    <a href="/bounty/{{ bounty.bounty_id }}/report" class="btn btn-secondary">View Report</a>
+    <a href="/bounty/{{ bounty.bounty_id }}/submission" class="btn btn-secondary">Submission</a>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Bounty Metadata -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Bounty Details</span>
+  </div>
+  <div class="intel-grid">
+    <div>
+      <div class="intel-row"><span class="intel-key">Target</span><span class="intel-val highlight">{{ bounty.target_url or bounty.domain }}</span></div>
+      <div class="intel-row"><span class="intel-key">Bounty ID</span><span class="intel-val" style="color: var(--purple)">{{ bounty.bounty_id }}</span></div>
+      <div class="intel-row"><span class="intel-key">Sponsor</span><span class="intel-val">{{ bounty.sponsor or '—' }}</span></div>
+    </div>
+    <div>
+      <div class="intel-row"><span class="intel-key">Multiplier</span><span class="intel-val warn">×{{ bounty.multiplier or 1.0 }}</span></div>
+      <div class="intel-row"><span class="intel-key">Max Claims</span><span class="intel-val">{{ bounty.max_claims or 1 }}</span></div>
+      <div class="intel-row"><span class="intel-key">Expires</span><span class="intel-val">{{ bounty.expires_raw or '—' }}</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Investigation Trigger / Progress -->
+<div class="card" id="investigation-card">
+  <div class="card-header">
+    <span class="card-title">Investigation Pipeline</span>
+    {% if bounty.status == 'pending' %}
+    <button class="btn btn-primary" id="start-btn" onclick="startInvestigation()">
+      ▶ Start Investigation
+    </button>
+    {% elif bounty.status == 'investigating' %}
+    <span class="badge badge-investigating">Running...</span>
+    {% elif bounty.status in ('complete', 'approved') %}
+    <span class="badge badge-complete">Complete</span>
+    {% endif %}
+  </div>
+
+  <!-- Pipeline stage indicators -->
+  <div id="pipeline-stages" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;">
+    {% for stage_id, stage_name in [('urlscan','URLScan'), ('whois','WHOIS'), ('passive_dns','Passive DNS'), ('social_osint','Social OSINT'), ('report','AI Report'), ('takedowns','Takedowns'), ('packaging','Package')] %}
+    <div class="stage-pill" data-stage="{{ stage_id }}"
+         style="padding: 4px 10px; border-radius: 3px; font-family: var(--mono); font-size: 11px;
+                background: var(--bg3); border: 1px solid var(--border); color: var(--muted);">
+      {{ stage_name }}
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Live log -->
+  <div class="progress-log" id="progress-log">
+    {% if bounty.status == 'pending' %}
+    <div class="log-entry"><span class="log-ts">--:--:--</span><span class="log-stage">ready</span><span class="log-msg">Awaiting investigation start.</span></div>
+    {% elif bounty.status in ('complete', 'approved') %}
+    <div class="log-entry done"><span class="log-ts">--:--:--</span><span class="log-stage">done</span><span class="log-msg">Investigation complete. See report →</span></div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Quick intel preview (if complete) -->
+{% if investigation %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Intel Summary</span>
+    <a href="/bounty/{{ bounty.bounty_id }}/report" class="btn btn-ghost">Full Report →</a>
+  </div>
+  <div class="intel-grid">
+    <div>
+      {% if investigation.urlscan %}
+      <div class="intel-row"><span class="intel-key">Primary IP</span><span class="intel-val highlight">{{ investigation.urlscan.get('primary_ip', '—') }}</span></div>
+      <div class="intel-row"><span class="intel-key">ASN / Hosting</span><span class="intel-val">{{ investigation.urlscan.get('asn_name', '—') }}</span></div>
+      <div class="intel-row"><span class="intel-key">Country</span><span class="intel-val">{{ investigation.urlscan.get('country', '—') }}</span></div>
+      {% endif %}
+      {% if investigation.whois %}
+      <div class="intel-row"><span class="intel-key">Registrar</span><span class="intel-val">{{ investigation.whois.get('registrar', '—') }}</span></div>
+      <div class="intel-row"><span class="intel-key">Registered</span><span class="intel-val">{{ investigation.whois.get('creation_date', '—') }}</span></div>
+      <div class="intel-row"><span class="intel-key">SOA Email</span><span class="intel-val warn">{{ investigation.whois.get('soa_email', '—') }}</span></div>
+      {% endif %}
+    </div>
+    <div>
+      {% if investigation.similar_domains %}
+      <div class="intel-row">
+        <span class="intel-key">Similar Sites</span>
+        <span class="intel-val highlight">{{ investigation.similar_domains|length }}</span>
+      </div>
+      {% endif %}
+      {% if investigation.passive_dns %}
+      <div class="intel-row">
+        <span class="intel-key">Linked Domains</span>
+        <span class="intel-val highlight">
+          {{ (investigation.passive_dns.get('linked_domains') or [])|length }}
+        </span>
+      </div>
+      {% endif %}
+      {% if investigation.social_osint %}
+      {% set wallets = investigation.social_osint.get('wallets_from_html', {}) %}
+      <div class="intel-row">
+        <span class="intel-key">Wallets Found</span>
+        <span class="intel-val warn">
+          {{ wallets.values() | sum(start=[]) | list | length }}
+        </span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- Takedown approval -->
+{% if bounty.status == 'complete' %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Takedown Approval</span>
+  </div>
+  <div style="color: var(--muted); font-family: var(--mono); font-size: 12px; margin-bottom: 16px;">
+    Review the report above, then approve to generate final takedown emails.
+    This action is logged.
+  </div>
+  <button class="btn btn-danger" onclick="approveTakedown()">
+    ⚡ Approve Takedowns
+  </button>
+  <div id="approve-result" style="margin-top: 12px;"></div>
+</div>
+{% elif bounty.status == 'approved' %}
+<div class="alert alert-success">
+  Takedowns approved. Submission package ready →
+  <a href="/bounty/{{ bounty.bounty_id }}/submission" style="color: var(--accent);">View Submission</a>
+</div>
+{% endif %}
+
+{% endif %}
+
+<script>
+const bountyId = "{{ bounty.bounty_id }}";
+
+function startInvestigation() {
+  document.getElementById('start-btn').disabled = true;
+  document.getElementById('start-btn').textContent = 'Starting...';
+
+  fetch(`/bounty/${bountyId}/investigate`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'started') {
+        listenProgress();
+      } else {
+        addLog('error', 'error', data.error || 'Failed to start');
+      }
+    });
+}
+
+function listenProgress() {
+  const es = new EventSource(`/bounty/${bountyId}/progress`);
+  const log = document.getElementById('progress-log');
+  log.innerHTML = '';
+
+  es.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    addLog(event.ts || '', event.stage, event.message);
+    highlightStage(event.stage);
+
+    if (event.stage === 'done') {
+      es.close();
+      setTimeout(() => window.location.reload(), 1500);
+    }
+    if (event.stage === 'error') {
+      es.close();
+    }
+  };
+
+  es.onerror = () => {
+    addLog('', 'error', 'Connection lost');
+    es.close();
+  };
+}
+
+function addLog(ts, stage, msg) {
+  const log = document.getElementById('progress-log');
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${stage}`;
+  entry.innerHTML = `<span class="log-ts">${ts}</span><span class="log-stage">${stage}</span><span class="log-msg">${msg}</span>`;
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight;
+}
+
+function highlightStage(stage) {
+  const pill = document.querySelector(`.stage-pill[data-stage="${stage}"]`);
+  if (pill) {
+    document.querySelectorAll('.stage-pill').forEach(p => {
+      if (p.style.color === 'var(--accent)') {
+        p.style.color = 'var(--muted)';
+        p.style.borderColor = 'var(--border)';
+      }
+    });
+    pill.style.color = 'var(--accent)';
+    pill.style.borderColor = 'var(--accent)';
+  }
+}
+
+function approveTakedown() {
+  if (!confirm('Approve takedown requests for {{ bounty.domain }}?')) return;
+  fetch(`/bounty/${bountyId}/approve`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('approve-result').innerHTML =
+        '<div class="alert alert-success">Approved. Redirecting to submission package...</div>';
+      setTimeout(() => window.location.reload(), 1500);
+    });
+}
+
+// If investigating on load, start listening
+{% if bounty.status == 'investigating' %}
+listenProgress();
+{% endif %}
+</script>
+{% endblock %}
