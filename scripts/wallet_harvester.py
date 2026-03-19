@@ -505,14 +505,32 @@ async def _attempt_login(page, base_url: str, identity: dict) -> bool:
             if not filled:
                 continue
 
+            # Solve captcha on login page if present
+            captcha_answer = await _solve_captcha_with_vision(page, base_url)
+            if captcha_answer:
+                for captcha_sel in [
+                    'input[name="botCheck"]', 'input[name="captcha"]',
+                    'input[id="captcha"]', 'input[class*="captcha"]',
+                ]:
+                    try:
+                        el = await page.query_selector(captcha_sel)
+                        if el and await el.is_visible():
+                            await el.fill(captcha_answer)
+                            break
+                    except Exception:
+                        continue
+
             await _submit_form(page)
             await page.wait_for_timeout(3000)
 
+            post_url = page.url
+            print(f"  [harvester] Login via {path} → {post_url}")
             if await _check_logged_in(page):
                 print(f"  [harvester] Login successful via {path}")
                 return True
 
-        except Exception:
+        except Exception as e:
+            print(f"  [harvester] Login {path} exception: {e}")
             continue
     return False
 
