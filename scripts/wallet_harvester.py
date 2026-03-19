@@ -544,15 +544,42 @@ async def _submit_deposit_form(page, base_url: str, output_dir: str, domain: str
                        ["deposit", "invest", "plan", "amount", "payment", "bitcoin", "wallet"]):
                 continue
 
+            # Select plan by name
             try:
-                selects = await page.query_selector_all("select")
-                for sel in selects:
-                    options = await sel.query_selector_all("option")
-                    for opt in options:
-                        val = await opt.get_attribute("value") or ""
-                        if val and val not in ("0", "", "select", "none"):
-                            await sel.select_option(val)
-                            break
+                for pname in ['select[name="h_id"]', 'select[name="plan"]', 'select[name="package"]']:
+                    ps = await page.query_selector(pname)
+                    if ps:
+                        opts = await ps.query_selector_all("option")
+                        for o in opts:
+                            v = await o.get_attribute("value") or ""
+                            if v and v not in ("", "0", "select", "none"):
+                                await ps.select_option(v)
+                                break
+                        break
+                else:
+                    selects = await page.query_selector_all("select")
+                    for sel in selects:
+                        opts = await sel.query_selector_all("option")
+                        for o in opts:
+                            v = await o.get_attribute("value") or ""
+                            if v and v not in ("", "0", "select", "none"):
+                                await sel.select_option(v)
+                                break
+            except Exception:
+                pass
+
+            # Select payment type by name
+            try:
+                for tname in ['select[name="type"]', 'select[name="payment"]', 'select[name="method"]']:
+                    ts = await page.query_selector(tname)
+                    if ts:
+                        for pval in ["process_1000", "process_1001", "btc", "bitcoin", "1"]:
+                            try:
+                                await ts.select_option(pval)
+                                break
+                            except Exception:
+                                continue
+                        break
             except Exception:
                 pass
 
@@ -560,7 +587,7 @@ async def _submit_deposit_form(page, base_url: str, output_dir: str, domain: str
                 for amt_sel in ['input[name="amount"]', 'input[placeholder*="amount" i]']:
                     amt = await page.query_selector(amt_sel)
                     if amt and await amt.is_visible():
-                        await amt.fill("50")
+                        await amt.fill("200")
                         break
             except Exception:
                 pass
