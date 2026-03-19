@@ -138,32 +138,17 @@ def run_investigation(bounty: dict, progress_callback=None) -> dict:
     # Stage 6: Blockchain
     progress("blockchain", "Analyzing crypto wallet transaction history...")
     all_wallets = results["social_osint"].get("wallets_from_html", {})
-
-    # If harvester already ran blockchain analysis, use it
-    harvest_bc = (results.get("wallet_harvest") or {}).get("blockchain", {})
     harvest_usd = (results.get("wallet_harvest") or {}).get("total_usd", 0)
 
-    if harvest_bc and harvest_usd > 0:
-        # Already analyzed — build blockchain_data from harvester results
-        blockchain_data = {
-            "by_currency": harvest_bc,
-            "total_usd":   harvest_usd,
-            "wallet_count": sum(len(v) for v in harvest_bc.values()),
-            "high_value":  harvest_usd > 10000,
-        }
-        results["blockchain"] = blockchain_data
-        progress("blockchain",
-                 f"${harvest_usd:,.2f} traced (from harvester) | "
-                 f"{blockchain_data['wallet_count']} wallets")
-        for currency, wallet_list in harvest_bc.items():
-            for w in wallet_list:
-                if isinstance(w, dict) and w.get("address"):
-                    upsert_wallet(domain, bounty_id, currency, w["address"], w)
-    elif all_wallets:
+    if all_wallets:
         blockchain_data = analyze_all_wallets(all_wallets)
-        results["blockchain"] = blockchain_data
         total_usd    = blockchain_data.get("total_usd", 0)
         wallet_count = blockchain_data.get("wallet_count", 0)
+        # Use whichever traced more — harvester or blockchain stage
+        if harvest_usd > total_usd:
+            blockchain_data["total_usd"] = harvest_usd
+            total_usd = harvest_usd
+        results["blockchain"] = blockchain_data
         progress("blockchain", f"${total_usd:,.2f} traced | {wallet_count} wallets")
         for currency, wallet_list in blockchain_data.get("by_currency", {}).items():
             for w in wallet_list:

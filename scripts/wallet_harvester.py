@@ -10,9 +10,7 @@ Fixed:
 """
 
 import os
-import sys
 import re
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import random
 import string
@@ -21,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 WALLET_PATTERNS = {
-    "BTC":        r"\b(bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b",
+    "BTC":        r"\b(bc1[a-zA-Z0-9]{25,62}|[13][a-zA-Z0-9]{25,34})\b",
     "ETH":        r"\b(0x[a-fA-F0-9]{40})\b",
     "USDT_TRC20": r"\b(T[A-Za-z0-9]{33})\b",
     "LTC":        r"\b(ltc1[a-zA-Z0-9]{25,62}|[LM][a-zA-Z0-9]{26,33})\b",
@@ -48,7 +46,7 @@ DEPOSIT_PATHS = [
     "/dashboard/deposit", "/dashboard/invest",
     "/account/deposit", "/wallet/deposit",
     "/plans", "/packages", "/invest/plans",
-    "/crypto/deposit", "/fund/deposit", "/?a=deposit", "/?a=invest", "/?a=wallet", "/?a=dashboard",
+    "/crypto/deposit", "/fund/deposit",
     "/user/dashboard", "/dashboard", "/home",
     "/user/home", "/member/deposit",
 ]
@@ -56,7 +54,7 @@ DEPOSIT_PATHS = [
 REGISTER_PATHS = [
     "/register", "/signup", "/sign-up",
     "/user/register", "/account/register",
-    "/auth/register", "/join", "/create-account", "/?a=signup", "/?a=register", "/?a=join",
+    "/auth/register", "/join", "/create-account",
     "/en/register", "/app/register",
 ]
 
@@ -65,7 +63,6 @@ LOGIN_PATHS = [
     "/user/login", "/account/login",
     "/auth/login", "/user/signin",
     "/en/login", "/app/login",
-    "/?a=login", "/?a=signin",
 ]
 
 # Indicators that we're logged in (on dashboard)
@@ -279,11 +276,18 @@ async def _check_logged_in(page) -> bool:
         content_lower = content.lower()
         url = page.url.lower()
 
-        # Check URL for dashboard indicators
-        if any(kw in url for kw in ["dashboard", "home", "account", "member"]):
+        # Must have logout/signout link — that only appears when actually logged in
+        # (not just marketing words like "dashboard" on homepage)
+        has_logout = any(kw in content_lower for kw in
+                         ["logout", "log out", "sign out", "signout"])
+        if not has_logout:
+            return False
+
+        # Also check URL for dashboard indicators
+        if any(kw in url for kw in ["dashboard", "account", "member", "user/home"]):
             return True
 
-        # Check page content
+        # Check content for authenticated-only indicators
         hit_count = sum(1 for kw in LOGIN_SUCCESS_INDICATORS if kw in content_lower)
         fail_count = sum(1 for kw in LOGIN_FAIL_INDICATORS if kw in content_lower)
 
@@ -306,33 +310,7 @@ async def _attempt_login(page, base_url: str, identity: dict) -> bool:
             if 'password' not in content.lower():
                 continue
 
-            # Try filling login form — sites use either email or username
-            filled = False
-            for user_selector in ['input[name="username"]', 'input[name="email"]',
-                                  'input[type="email"]', 'input[name="login"]']:
-                try:
-                    el = await page.query_selector(user_selector)
-                    if el and await el.is_visible():
-                        # Use username if field is named username, else email
-                        val = identity["username"] if "username" in user_selector else identity["email"]
-                        await el.fill(val)
-                        filled = True
-                        break
-                except Exception:
-                    continue
-
-            for pwd_selector in ['input[name="password"]', 'input[type="password"]']:
-                try:
-                    el = await page.query_selector(pwd_selector)
-                    if el and await el.is_visible():
-                        await el.fill(identity["password"])
-                        break
-                except Exception:
-                    continue
-
-            if not filled:
-                continue
-
+            await _fill_form_fields(page, identity)
             await _submit_form(page)
             await page.wait_for_timeout(3000)
 
@@ -549,13 +527,11 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
                     screenshots.append(ss)
                     registration_success = True
 
-                    # Always attempt explicit login after registration
-                    # (registration page may look like dashboard but session isn't set)
-                    print(f"  [harvester] Attempting login after registration...")
-                    login_success = await _attempt_login(page, base_url, identity)
-                    if login_success:
-                        print(f"  [harvester] Logged in after registration")
-                    break
+                    # Check if we got logged in automatically after registration
+                    if await _check_logged_in(page):
+                        login_success = True
+                        print(f"  [harvester] Auto-logged in after registration")
+                        break
 
                     # Check for verification requirement
                     content = await page.content()
