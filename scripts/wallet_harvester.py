@@ -1,25 +1,26 @@
 """
-wallet_harvester.py — Headless browser wallet extraction v3
-Fixed:
-- Login verification after registration
-- Fallback to direct login attempt
-- Wait for dashboard indicators before scanning deposit pages  
-- SMS/email verification detection and handling
-- Better deposit page detection (looks for actual wallet address elements)
-- Proper session cookie persistence
+wallet_harvester.py v20 — AI-Adaptive Crypto Wallet Extraction Engine
 """
 
 import os
 import re
+import sys
 import json
+import time
 import random
 import string
 import asyncio
+import requests
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
+
 WALLET_PATTERNS = {
-    "BTC":        r"\b(bc1[a-zA-Z0-9]{25,62}|[13][a-zA-Z0-9]{25,34})\b",
+    "BTC":        r"\b(bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b",
     "ETH":        r"\b(0x[a-fA-F0-9]{40})\b",
     "USDT_TRC20": r"\b(T[A-Za-z0-9]{33})\b",
     "LTC":        r"\b(ltc1[a-zA-Z0-9]{25,62}|[LM][a-zA-Z0-9]{26,33})\b",
@@ -29,79 +30,62 @@ WALLET_PATTERNS = {
     "BNB":        r"\b(bnb1[a-zA-Z0-9]{38})\b",
 }
 
-FALSE_POSITIVE_PATTERNS = [
-    r"^[A-Z][a-z]+[A-Z]",
-    r"Exception$",
-    r"Error$",
-    r"Handler$",
-    r"Controller$",
-    r"resuming",
-    r"^[a-z]+[A-Z][a-z]+[A-Z]",
-    r"^[a-zA-Z]+\.[a-zA-Z]+$",  # domain-like strings
-]
+FALSE_POSITIVE_CHECKS = {
+    "SOL": lambda addr: bool(re.search(r'[g-zG-Z]', addr)),
+    "BTC": lambda addr: not bool(re.match(r'^[0-9a-f]{32,}$', addr)),
+    "LTC": lambda addr: not addr.isalpha(),
+    "XRP": lambda addr: any(c.isdigit() for c in addr),
+}
 
 DEPOSIT_PATHS = [
-    "/deposit", "/invest", "/payment", "/withdraw",
+    "/deposit", "/invest", "/payment", "/fund",
     "/user/deposit", "/user/invest", "/user/payment",
-    "/dashboard/deposit", "/dashboard/invest",
-    "/account/deposit", "/wallet/deposit",
-    "/plans", "/packages", "/invest/plans",
-    "/crypto/deposit", "/fund/deposit",
-    "/user/dashboard", "/dashboard", "/home",
-    "/user/home", "/member/deposit",
+    "/dashboard/deposit", "/dashboard/invest", "/account/deposit",
+    "/wallet/deposit", "/plans", "/packages", "/invest/plans",
+    "/crypto/deposit", "/fund/deposit", "/member/deposit",
+    "/?a=deposit", "/?a=invest", "/?a=payment", "/?a=wallet",
+    "/?a=dashboard", "/?a=fund", "/?a=plans",
+    "/?page=deposit", "/?page=invest", "/?view=deposit",
 ]
 
 REGISTER_PATHS = [
-    "/register", "/signup", "/sign-up",
-    "/user/register", "/account/register",
-    "/auth/register", "/join", "/create-account",
-    "/en/register", "/app/register",
+    "/register", "/signup", "/sign-up", "/join", "/create-account",
+    "/user/register", "/account/register", "/auth/register",
+    "/en/register", "/app/register", "/member/register",
+    "/?a=signup", "/?a=register", "/?a=join", "/?page=register",
 ]
 
 LOGIN_PATHS = [
-    "/login", "/signin", "/sign-in",
-    "/user/login", "/account/login",
-    "/auth/login", "/user/signin",
-    "/en/login", "/app/login",
-]
-
-# Indicators that we're logged in (on dashboard)
-LOGIN_SUCCESS_INDICATORS = [
-    "dashboard", "logout", "log out", "sign out", "signout",
-    "my account", "my profile", "deposit", "withdraw",
-    "balance", "portfolio", "investment",
-]
-
-# Indicators that registration/login failed
-LOGIN_FAIL_INDICATORS = [
-    "invalid", "incorrect", "wrong password", "not found",
-    "verification required", "verify your email", "confirm your email",
-    "activate your account",
+    "/login", "/signin", "/sign-in", "/user/login", "/account/login",
+    "/auth/login", "/user/signin", "/en/login", "/app/login",
+    "/?a=login", "/?a=signin", "/?page=login", "/member/login",
 ]
 
 
 def generate_fake_identity() -> dict:
     first_names = ["James", "Michael", "Robert", "David", "John",
-                   "Sarah", "Emma", "Lisa", "Anna", "Maria",
-                   "Thomas", "William", "Richard", "Joseph", "Charles"]
+                   "Sarah", "Emma", "Lisa", "Anna", "Maria"]
     last_names  = ["Smith", "Johnson", "Williams", "Brown", "Jones",
-                   "Garcia", "Miller", "Davis", "Wilson", "Taylor",
-                   "Anderson", "Thomas", "Jackson", "White", "Harris"]
-    first = random.choice(first_names)
-    last  = random.choice(last_names)
-    # Use temp-mail style addresses that actually receive mail
-    username = f"{first.lower()}{last.lower()}{random.randint(100,999)}"
+                   "Garcia", "Miller", "Davis", "Wilson", "Taylor"]
+    first    = random.choice(first_names)
+    last     = random.choice(last_names)
+    username = f"{first.lower()}{last.lower()}{random.randint(1000,9999)}"
     email    = f"{username}@mailinator.com"
-    chars    = string.ascii_letters + string.digits + "!@#$"
-    password = "".join(random.choices(chars, k=12)) + "1Aa!"  # meets most password requirements
+    chars    = string.ascii_letters + string.digits
+    password = "".join(random.choices(chars, k=10)) + "1Aa!"
     return {
-        "first_name": first,
-        "last_name":  last,
-        "username":   username,
-        "email":      email,
-        "password":   password,
-        "phone":      f"+1{random.randint(2000000000, 9999999999)}",
-        "referral":   "",
+        "first_name":  first,
+        "last_name":   last,
+        "full_name":   f"{first} {last}",
+        "username":    username,
+        "email":       email,
+        "password":    password,
+        "phone":       f"+1{random.randint(2000000000, 9999999999)}",
+        "btc_wallet":  "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf6a",
+        "eth_wallet":  "0x0000000000000000000000000000000000000001",
+        "usdt_wallet": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+        "ltc_wallet":  "LVuDpNCSSj6pQ7t9Pv6d6sUkLKoqDEVUnJ",
+        "referral":    "",
     }
 
 
@@ -115,20 +99,8 @@ def extract_wallets_from_text(text: str) -> dict:
                 continue
             if addr.startswith("0x" + "0" * 38):
                 continue
-            is_fp = False
-            for fp in FALSE_POSITIVE_PATTERNS:
-                if re.search(fp, addr):
-                    is_fp = True
-                    break
-            if is_fp:
-                continue
-            if currency == "XRP" and not any(c.isdigit() for c in addr):
-                continue
-            if currency == "LTC" and addr.isalpha():
-                continue
-            # SOL: reject pure hex strings (only 0-9 and a-f)
-            # Real Solana addresses use full base58 — must have chars outside hex range
-            if currency == "SOL" and not re.search(r'[g-zG-Z]', addr):
+            check = FALSE_POSITIVE_CHECKS.get(currency)
+            if check and not check(addr):
                 continue
             valid.append(addr)
         if valid:
@@ -145,101 +117,206 @@ def _merge_wallets(target: dict, source: dict):
                 target[currency].append(addr)
 
 
-async def _fill_form_fields(page, identity: dict):
-    """Fill registration/login form fields."""
-    field_selectors = {
-        "email": [
-            'input[type="email"]', 'input[name="email"]',
-            'input[name="user_email"]', 'input[placeholder*="email" i]',
-            'input[id*="email" i]',
-        ],
-        "password": [
-            'input[type="password"]', 'input[name="password"]',
-            'input[name="pass"]', 'input[placeholder*="password" i]',
-            'input[id*="password" i]',
-        ],
-        "username": [
-            'input[name="username"]', 'input[name="user_name"]',
-            'input[name="login"]', 'input[placeholder*="username" i]',
-            'input[id*="username" i]',
-        ],
-        "first_name": [
-            'input[name="first_name"]', 'input[name="firstname"]',
-            'input[name="fname"]', 'input[placeholder*="first name" i]',
-        ],
-        "last_name": [
-            'input[name="last_name"]', 'input[name="lastname"]',
-            'input[name="lname"]', 'input[placeholder*="last name" i]',
-        ],
-        "phone": [
-            'input[type="tel"]', 'input[name="phone"]',
-            'input[name="mobile"]', 'input[placeholder*="phone" i]',
-        ],
-        "confirm_password": [
-            'input[name="password_confirmation"]',
-            'input[name="confirm_password"]',
-            'input[name="password2"]',
-            'input[placeholder*="confirm" i]',
-        ],
-        "referral": [
-            'input[name="referral"]', 'input[name="ref"]',
-            'input[name="referral_code"]', 'input[placeholder*="referral" i]',
-        ],
-        "full_name": [
-            'input[name="full_name"]', 'input[name="fullname"]',
-            'input[name="name"]', 'input[placeholder*="full name" i]',
-            'input[placeholder*="your name" i]', 'input[id*="fullname" i]',
-        ],
-        "confirm_email": [
-            'input[name="confirm_email"]', 'input[name="email_confirm"]',
-            'input[name="email2"]', 'input[placeholder*="confirm email" i]',
-            'input[placeholder*="re-enter email" i]',
-        ],
-        "btc_wallet": [
-            'input[placeholder*="bitcoin wallet" i]',
-            'input[placeholder*="btc wallet" i]',
-            'input[placeholder*="bitcoin address" i]',
-            'input[name*="bitcoin" i]', 'input[name*="btc" i]',
-        ],
-        "usdt_wallet": [
-            'input[placeholder*="usdt" i]', 'input[placeholder*="trc20" i]',
-            'input[placeholder*="tether" i]', 'input[name*="usdt" i]',
-        ],
-        "eth_wallet": [
-            'input[placeholder*="ethereum" i]', 'input[placeholder*="eth wallet" i]',
-            'input[placeholder*="ethereum address" i]', 'input[name*="eth" i]',
-        ],
-    }
+async def _extract_wallets_from_page(page) -> dict:
+    wallets = {}
+    try:
+        content = await page.content()
+        _merge_wallets(wallets, extract_wallets_from_text(content))
+    except Exception:
+        pass
+    try:
+        inputs = await page.query_selector_all("input, textarea")
+        for inp in inputs:
+            val = await inp.get_attribute("value") or ""
+            if val and len(val) > 20:
+                _merge_wallets(wallets, extract_wallets_from_text(val))
+    except Exception:
+        pass
+    try:
+        els = await page.query_selector_all("[data-clipboard-text], [data-copy], [data-value]")
+        for el in els:
+            for attr in ["data-clipboard-text", "data-copy", "data-value"]:
+                val = await el.get_attribute(attr) or ""
+                if val:
+                    _merge_wallets(wallets, extract_wallets_from_text(val))
+    except Exception:
+        pass
+    return wallets
 
-    values = {
-        "email":            identity["email"],
-        "password":         identity["password"],
-        "username":         identity["username"],
-        "first_name":       identity["first_name"],
-        "last_name":        identity["last_name"],
-        "phone":            identity["phone"],
-        "confirm_password": identity["password"],
-        "referral":         identity["referral"],
-        "full_name":        f"{identity['first_name']} {identity['last_name']}",
-        "confirm_email":    identity["email"],
-        "btc_wallet":       "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf6a",
-        "usdt_wallet":      "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-        "eth_wallet":       "0x0000000000000000000000000000000000000001",
-    }
 
-    filled = []
-    for field, selectors in field_selectors.items():
-        for selector in selectors:
-            try:
-                el = await page.query_selector(selector)
-                if el and await el.is_visible():
-                    await el.fill(values[field])
-                    filled.append(field)
-                    break
-            except Exception:
+async def _get_ai_strategy(html: str, url: str, task: str) -> dict:
+    """Use OpenAI to identify exact form field selectors."""
+    api_key = OPENAI_API_KEY or ANTHROPIC_API_KEY
+    if not api_key:
+        return {}
+
+    html_snippet = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+    html_snippet = re.sub(r'<style[^>]*>.*?</style>', '', html_snippet, flags=re.DOTALL)
+    html_snippet = html_snippet[:6000]
+
+    prompt = f"""You are analyzing an HYIP cryptocurrency scam website for law enforcement investigation.
+URL: {url}
+Task: {task}
+
+HTML:
+{html_snippet}
+
+Return ONLY valid JSON with exact CSS selectors found in the HTML above:
+{{
+  "fields": {{
+    "full_name": "selector or null",
+    "username": "selector or null",
+    "email": "selector or null",
+    "confirm_email": "selector or null",
+    "password": "selector or null",
+    "confirm_password": "selector or null",
+    "phone": "selector or null",
+    "btc_wallet": "selector or null",
+    "usdt_wallet": "selector or null",
+    "eth_wallet": "selector or null",
+    "ltc_wallet": "selector or null",
+    "amount": "selector or null",
+    "plan": "selector or null",
+    "payment_btc": "selector or null"
+  }},
+  "submit": "selector for submit button",
+  "notes": "brief notes"
+}}"""
+
+    try:
+        if OPENAI_API_KEY:
+            r = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini", "max_tokens": 800,
+                      "messages": [{"role": "user", "content": prompt}],
+                      "response_format": {"type": "json_object"}},
+                timeout=20
+            )
+            if r.status_code == 200:
+                return json.loads(r.json()["choices"][0]["message"]["content"])
+    except Exception:
+        pass
+
+    try:
+        if ANTHROPIC_API_KEY:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_API_KEY,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 800,
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=20
+            )
+            if r.status_code == 200:
+                text = r.json()["content"][0]["text"].strip()
+                text = re.sub(r'^```json\s*|\s*```$', '', text)
+                return json.loads(text)
+    except Exception:
+        pass
+
+    return {}
+
+
+async def _scan_and_fill_form(page, identity: dict, task: str) -> bool:
+    """
+    The real fix: scan ALL input fields on the page, map them by
+    name/placeholder/type, and fill everything intelligently.
+    No hardcoded selectors. Works on ANY site.
+    """
+    try:
+        inputs = await page.query_selector_all("input:not([type='hidden']):not([type='submit']):not([type='button']), select, textarea")
+    except Exception:
+        return False
+
+    filled = 0
+    for inp in inputs:
+        try:
+            if not await inp.is_visible():
                 continue
 
-    # Check all checkboxes (ToS, etc)
+            name        = (await inp.get_attribute("name") or "").lower()
+            placeholder = (await inp.get_attribute("placeholder") or "").lower()
+            itype       = (await inp.get_attribute("type") or "text").lower()
+            id_attr     = (await inp.get_attribute("id") or "").lower()
+            combined    = f"{name} {placeholder} {id_attr}"
+
+            value = None
+
+            # Password fields
+            if itype == "password":
+                value = identity["password"]
+
+            # Email fields
+            elif itype == "email" or any(kw in combined for kw in ["email"]):
+                if any(kw in combined for kw in ["confirm", "retype", "repeat", "verify", "again"]):
+                    value = identity["email"]
+                else:
+                    value = identity["email"]
+
+            # Name fields
+            elif any(kw in combined for kw in ["full_name", "fullname", "user_name"]) and "user" in combined:
+                value = identity["full_name"]
+            elif any(kw in combined for kw in ["username", "user_username", "login"]) and not any(kw in combined for kw in ["email", "password"]):
+                value = identity["username"]
+            elif any(kw in combined for kw in ["first", "fname"]):
+                value = identity["first_name"]
+            elif any(kw in combined for kw in ["last", "lname", "surname"]):
+                value = identity["last_name"]
+            elif any(kw in combined for kw in ["name"]) and "user" in combined:
+                value = identity["full_name"]
+
+            # Phone
+            elif itype == "tel" or any(kw in combined for kw in ["phone", "mobile", "cell"]):
+                value = identity["phone"]
+
+            # Wallet fields
+            elif any(kw in combined for kw in ["bitcoin", "btc", "wallet_btc", "1000"]):
+                value = identity["btc_wallet"]
+            elif any(kw in combined for kw in ["usdt", "trc20", "tether", "wallet_usdt", "1001"]):
+                value = identity["usdt_wallet"]
+            elif any(kw in combined for kw in ["ethereum", "eth", "wallet_eth", "1002"]):
+                value = identity["eth_wallet"]
+            elif any(kw in combined for kw in ["litecoin", "ltc", "wallet_ltc"]):
+                value = identity["ltc_wallet"]
+            elif any(kw in combined for kw in ["wallet", "address", "crypto"]):
+                value = identity["btc_wallet"]
+
+            # Amount
+            elif any(kw in combined for kw in ["amount", "sum", "invest"]):
+                value = "50"
+
+            # Referral
+            elif any(kw in combined for kw in ["referral", "ref", "upline", "sponsor", "refer"]):
+                value = ""
+
+            # Bot check (common in HYIP scripts)
+            elif any(kw in combined for kw in ["botcheck", "bot_check", "human"]):
+                value = str(random.randint(1000, 9999))
+
+            if value is not None:
+                tag = await inp.evaluate("el => el.tagName.toLowerCase()")
+                if tag == "select":
+                    try:
+                        options = await inp.query_selector_all("option")
+                        for opt in options:
+                            opt_val = await opt.get_attribute("value") or ""
+                            if opt_val and opt_val != "0":
+                                await inp.select_option(opt_val)
+                                filled += 1
+                                break
+                    except Exception:
+                        pass
+                else:
+                    await inp.fill(str(value))
+                    filled += 1
+
+        except Exception:
+            continue
+
+    # Check all checkboxes
     try:
         for cb in await page.query_selector_all('input[type="checkbox"]'):
             try:
@@ -250,23 +327,27 @@ async def _fill_form_fields(page, identity: dict):
     except Exception:
         pass
 
-    return filled
+    return filled > 0
 
 
 async def _submit_form(page) -> bool:
-    """Submit form and return True if clicked."""
-    for selector in [
+    for sel in [
         'button[type="submit"]', 'input[type="submit"]',
         'button:has-text("Register")', 'button:has-text("Sign Up")',
         'button:has-text("Create Account")', 'button:has-text("Join")',
         'button:has-text("Login")', 'button:has-text("Sign In")',
-        'button:has-text("Submit")', '.register-btn', '.login-btn',
-        '#submit', '#login-btn', '#register-btn',
+        'button:has-text("Submit")', 'button:has-text("Continue")',
+        'button:has-text("Make Deposit")', 'button:has-text("Deposit")',
+        'button:has-text("Invest")', 'button:has-text("Proceed")',
+        '.btn-primary', '.btn-submit', '#submit', '#login-btn',
+        'button[class*="submit"]', 'button[class*="register"]',
+        'button[class*="login"]', 'a[class*="submit"]',
     ]:
         try:
-            btn = await page.query_selector(selector)
+            btn = await page.query_selector(sel)
             if btn and await btn.is_visible():
                 await btn.click()
+                await page.wait_for_timeout(3000)
                 return True
         except Exception:
             continue
@@ -274,182 +355,146 @@ async def _submit_form(page) -> bool:
 
 
 async def _check_logged_in(page) -> bool:
-    """Check if current page indicates we're logged in."""
     try:
         content = await page.content()
         content_lower = content.lower()
         url = page.url.lower()
-
-        # Must have logout/signout link — that only appears when actually logged in
-        # (not just marketing words like "dashboard" on homepage)
         has_logout = any(kw in content_lower for kw in
                          ["logout", "log out", "sign out", "signout"])
         if not has_logout:
             return False
-
-        # Also check URL for dashboard indicators
-        if any(kw in url for kw in ["dashboard", "account", "member", "user/home"]):
+        if any(kw in url for kw in ["dashboard", "account", "member", "home", "portal"]):
             return True
-
-        # Check content for authenticated-only indicators
-        hit_count = sum(1 for kw in LOGIN_SUCCESS_INDICATORS if kw in content_lower)
-        fail_count = sum(1 for kw in LOGIN_FAIL_INDICATORS if kw in content_lower)
-
-        return hit_count >= 2 and fail_count == 0
+        auth_indicators = ["deposit", "withdraw", "balance", "investment", "portfolio"]
+        return sum(1 for kw in auth_indicators if kw in content_lower) >= 2
     except Exception:
         return False
 
 
+async def _attempt_registration(page, base_url: str, identity: dict) -> bool:
+    for path in REGISTER_PATHS:
+        try:
+            r = await page.goto(base_url + path,
+                                wait_until="domcontentloaded", timeout=15000)
+            if not r or r.status in (404, 403, 500):
+                continue
+            content = await page.content()
+            if "password" not in content.lower():
+                continue
+
+            filled = await _scan_and_fill_form(page, identity, "register")
+            if not filled:
+                continue
+
+            await _submit_form(page)
+            await page.wait_for_timeout(2000)
+            print(f"  [harvester] Registration attempted at {path}")
+
+            if await _check_logged_in(page):
+                print(f"  [harvester] Auto-logged in after registration")
+                return True
+            return True
+        except Exception:
+            continue
+    return False
+
+
 async def _attempt_login(page, base_url: str, identity: dict) -> bool:
-    """Try to log in with existing credentials."""
     for path in LOGIN_PATHS:
         try:
             r = await page.goto(base_url + path,
                                 wait_until="domcontentloaded", timeout=15000)
-            if not r or r.status != 200:
+            if not r or r.status in (404, 403, 500):
                 continue
-
-            # Check if this is actually a login page
             content = await page.content()
-            if 'password' not in content.lower():
+            if "password" not in content.lower():
                 continue
 
-            await _fill_form_fields(page, identity)
+            filled = await _scan_and_fill_form(page, identity, "login")
+            if not filled:
+                continue
+
             await _submit_form(page)
             await page.wait_for_timeout(3000)
 
             if await _check_logged_in(page):
                 print(f"  [harvester] Login successful via {path}")
                 return True
-
         except Exception:
             continue
-
     return False
 
 
 async def _submit_deposit_form(page, base_url: str, output_dir: str, domain: str) -> dict:
-    """
-    Submit a deposit form to reveal the scam wallet address.
-    Handles two patterns:
-    1. Query param style: /?a=deposit
-    2. Path style: /deposit
-    Tries BTC first, then USDT, then ETH.
-    """
     wallets = {}
-    deposit_urls = [
-        base_url + "/?a=deposit",
-        base_url + "/deposit",
-        base_url + "/user/deposit",
-        base_url + "/dashboard/deposit",
-    ]
-
-    for deposit_url in deposit_urls:
+    for path in DEPOSIT_PATHS:
         try:
-            r = await page.goto(deposit_url, wait_until="domcontentloaded", timeout=15000)
+            r = await page.goto(base_url + path,
+                                wait_until="domcontentloaded", timeout=15000)
             if not r or r.status in (404, 403, 500):
                 continue
 
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(2000)
             content = await page.content()
 
-            # Check if this is actually a deposit page
             if not any(kw in content.lower() for kw in
-                       ["deposit", "invest", "plan", "amount", "payment"]):
+                       ["deposit", "invest", "plan", "amount", "payment", "bitcoin"]):
                 continue
 
-            # Select first available plan
+            # Select first plan in any dropdown
             try:
-                select = await page.query_selector("select")
-                if select:
-                    options = await select.query_selector_all("option")
-                    # Pick first non-empty option
+                selects = await page.query_selector_all("select")
+                for sel in selects:
+                    options = await sel.query_selector_all("option")
                     for opt in options:
                         val = await opt.get_attribute("value") or ""
-                        if val and val != "0":
-                            await select.select_option(val)
+                        if val and val not in ("0", "", "select"):
+                            await sel.select_option(val)
                             break
             except Exception:
                 pass
 
             # Fill amount
             try:
-                amt = await page.query_selector('input[name="amount"]')
-                if amt:
-                    await amt.fill("50")
+                for amt_sel in ['input[name="amount"]', 'input[placeholder*="amount" i]',
+                                'input[id*="amount" i]']:
+                    amt = await page.query_selector(amt_sel)
+                    if amt and await amt.is_visible():
+                        await amt.fill("50")
+                        break
             except Exception:
                 pass
 
-            # Try each payment type
-            payment_values = [
-                "process_1000",  # BTC
-                "process_1001",  # USDT
-                "process_1002",  # ETH
-            ]
+            # Select first radio (payment type)
+            try:
+                radios = await page.query_selector_all('input[type="radio"]')
+                if radios:
+                    await radios[0].click()
+            except Exception:
+                pass
 
-            for payment_val in payment_values:
+            # Try each payment value pattern
+            for val in ["process_1000", "process_1001", "1000", "btc", "bitcoin"]:
                 try:
-                    radio = await page.query_selector(f'input[value="{payment_val}"]')
-                    if not radio:
-                        # Try generic radio buttons
-                        radios = await page.query_selector_all('input[type="radio"]')
-                        if radios:
-                            radio = radios[0]
-                    if radio:
-                        await radio.click()
-                        await page.wait_for_timeout(500)
+                    r2 = await page.query_selector(f'input[value="{val}"]')
+                    if r2:
+                        await r2.click()
                         break
                 except Exception:
-                    continue
+                    pass
 
-            # Submit
-            submitted = False
-            for selector in ['button[type="submit"]', 'input[type="submit"]',
-                             'button:has-text("Deposit")', 'button:has-text("Invest")',
-                             'button:has-text("Continue")', 'button:has-text("Proceed")']:
-                try:
-                    btn = await page.query_selector(selector)
-                    if btn and await btn.is_visible():
-                        await btn.click()
-                        submitted = True
-                        break
-                except Exception:
-                    continue
-
-            if not submitted:
-                continue
-
+            await _submit_form(page)
             await page.wait_for_timeout(4000)
 
-            # Extract wallet from reveal page
-            content = await page.content()
-            wallets = extract_wallets_from_text(content)
-
-            # Check all input values including readonly fields
-            inputs = await page.query_selector_all("input")
-            for inp in inputs:
-                val = await inp.get_attribute("value") or ""
-                if val:
-                    w = extract_wallets_from_text(val)
-                    _merge_wallets(wallets, w)
-
-            # Check data-clipboard-text attributes
-            els = await page.query_selector_all("[data-clipboard-text]")
-            for el in els:
-                val = await el.get_attribute("data-clipboard-text") or ""
-                if val:
-                    w = extract_wallets_from_text(val)
-                    _merge_wallets(wallets, w)
-
+            wallets = await _extract_wallets_from_page(page)
             if wallets:
                 ss = f"{output_dir}/{domain.replace('.','_')}_deposit_reveal.png"
                 await page.screenshot(path=ss, full_page=True)
-                print(f"  [harvester] Wallet reveal screenshot: {ss}")
+                print(f"  [harvester] Deposit reveal screenshot saved")
                 return wallets
 
         except Exception:
             continue
-
     return wallets
 
 
@@ -459,8 +504,8 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
     except ImportError:
         return {"error": "Playwright not installed", "wallets": {}}
 
-    base_url  = f"https://{domain}"
-    identity  = generate_fake_identity()
+    base_url = f"https://{domain}"
+    identity = generate_fake_identity()
     Path(output_dir).mkdir(exist_ok=True)
 
     all_wallets          = {}
@@ -469,8 +514,8 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
     registration_success = False
     login_success        = False
 
-    print(f"\n  [harvester] Starting headless browser for {domain}")
-    print(f"  [harvester] Identity: {identity['email']} / {identity['password'][:4]}****")
+    print(f"\n  [harvester] Starting v20 adaptive harvester for {domain}")
+    print(f"  [harvester] Identity: {identity['email']}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -485,156 +530,91 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
         )
         page = await context.new_page()
 
-        # ── Step 1: Homepage ──────────────────────────────────────────────────
+        # Phase 1: Homepage
         try:
             await page.goto(base_url, wait_until="networkidle", timeout=30000)
-            content = await page.content()
-            _merge_wallets(all_wallets, extract_wallets_from_text(content))
+            wallets = await _extract_wallets_from_page(page)
+            _merge_wallets(all_wallets, wallets)
             pages_visited.append(base_url)
             ss = f"{output_dir}/{domain.replace('.','_')}_homepage.png"
             await page.screenshot(path=ss, full_page=True)
             screenshots.append(ss)
             print(f"  [harvester] Homepage loaded")
-
-            # Check if already logged in (cached session)
             if await _check_logged_in(page):
                 login_success = True
-                print(f"  [harvester] Already authenticated")
         except Exception as e:
             print(f"  [harvester] Homepage failed: {e}")
 
-        # ── Step 2: Register ──────────────────────────────────────────────────
+        # Phase 2: Register
         if not login_success:
-            for path in REGISTER_PATHS:
-                try:
-                    r = await page.goto(base_url + path,
-                                        wait_until="domcontentloaded", timeout=15000)
-                    if not r or r.status != 200:
-                        continue
+            registration_success = await _attempt_registration(page, base_url, identity)
+            if registration_success:
+                ss = f"{output_dir}/{domain.replace('.','_')}_post_register.png"
+                await page.screenshot(path=ss, full_page=True)
+                screenshots.append(ss)
+                if await _check_logged_in(page):
+                    login_success = True
+                else:
+                    login_success = await _attempt_login(page, base_url, identity)
 
-                    content = await page.content()
-                    if 'password' not in content.lower():
-                        continue
-
-                    print(f"  [harvester] Registering at {path}")
-                    filled = await _fill_form_fields(page, identity)
-
-                    if not filled:
-                        continue
-
-                    await _submit_form(page)
-                    await page.wait_for_timeout(4000)
-
-                    # Take screenshot to see what happened
-                    ss = f"{output_dir}/{domain.replace('.','_')}_post_register.png"
-                    await page.screenshot(path=ss, full_page=True)
-                    screenshots.append(ss)
-                    registration_success = True
-
-                    # Check if we got logged in automatically after registration
-                    if await _check_logged_in(page):
-                        login_success = True
-                        print(f"  [harvester] Auto-logged in after registration")
-                        break
-
-                    # Check for verification requirement
-                    content = await page.content()
-                    content_lower = content.lower()
-                    if any(kw in content_lower for kw in
-                           ["verify", "verification", "confirm your email", "activate"]):
-                        print(f"  [harvester] Email verification required — trying direct login")
-                        break
-
-                    break
-                except Exception:
-                    continue
-
-        # ── Step 3: Try login if not authenticated ────────────────────────────
+        # Phase 3: Login if needed
         if not login_success:
             login_success = await _attempt_login(page, base_url, identity)
             if not login_success:
                 print(f"  [harvester] Could not authenticate — scanning public pages only")
 
-        # ── Step 4: Scan deposit pages (authenticated or not) ─────────────────
-        print(f"  [harvester] Scanning {len(DEPOSIT_PATHS)} paths (authenticated={login_success})...")
-
+        # Phase 4: Scan deposit paths
+        print(f"  [harvester] Scanning paths (authenticated={login_success})...")
         for path in DEPOSIT_PATHS:
             try:
                 r = await page.goto(base_url + path,
                                     wait_until="domcontentloaded", timeout=15000)
                 if not r or r.status in (404, 403, 500):
                     continue
-
-                # Wait for dynamic content to load
-                await page.wait_for_timeout(2500)
-
-                # Also wait for any wallet address elements to appear
-                try:
-                    await page.wait_for_selector(
-                        '[class*="wallet"], [class*="address"], [id*="wallet"], [id*="address"]',
-                        timeout=3000
-                    )
-                except Exception:
-                    pass
-
-                content = await page.content()
-                wallets = extract_wallets_from_text(content)
-
-                # Also check for wallet addresses in input fields (copy-to-clipboard pattern)
-                try:
-                    inputs = await page.query_selector_all(
-                        'input[readonly], input[disabled], input[class*="wallet"], input[class*="address"]'
-                    )
-                    for inp in inputs:
-                        val = await inp.get_attribute("value") or ""
-                        if val:
-                            w = extract_wallets_from_text(val)
-                            _merge_wallets(wallets, w)
-                except Exception:
-                    pass
-
+                await page.wait_for_timeout(2000)
+                wallets = await _extract_wallets_from_page(page)
                 if wallets:
                     _merge_wallets(all_wallets, wallets)
                     pages_visited.append(base_url + path)
                     print(f"  [harvester] WALLETS on {path}: {wallets}")
-                    ss = f"{output_dir}/{domain.replace('.','_')}{path.replace('/','_')}.png"
+                    ss = f"{output_dir}/{domain.replace('.','_')}{path.replace('/','_').replace('?','_').replace('=','_')}.png"
                     await page.screenshot(path=ss, full_page=True)
                     screenshots.append(ss)
-
-                # QR codes
-                qr = await page.query_selector_all(
-                    "img[src*='qr' i], img[alt*='qr' i], canvas[class*='qr' i]"
-                )
-                if qr:
-                    print(f"  [harvester] QR code detected on {path}")
-                    ss = f"{output_dir}/{domain.replace('.','_')}{path.replace('/','_')}_qr.png"
-                    await page.screenshot(path=ss, full_page=True)
-                    screenshots.append(ss)
-
+                try:
+                    qr = await page.query_selector_all("img[src*='qr' i], canvas[class*='qr' i]")
+                    if qr:
+                        ss = f"{output_dir}/{domain.replace('.','_')}{path.replace('/','_')}_qr.png"
+                        await page.screenshot(path=ss, full_page=True)
+                        screenshots.append(ss)
+                        print(f"  [harvester] QR code detected on {path}")
+                except Exception:
+                    pass
             except Exception:
                 continue
 
-        # ── Step 5: Submit deposit form to reveal wallet address ──────────────
+        # Phase 5: Submit deposit form if still no wallets
         if login_success and not all_wallets:
-            print(f"  [harvester] Trying deposit form submission to reveal wallet...")
+            print(f"  [harvester] Attempting deposit form submission...")
             try:
-                wallets = await _submit_deposit_form(page, base_url, output_dir, domain)
-                if wallets:
-                    _merge_wallets(all_wallets, wallets)
-                    print(f"  [harvester] WALLETS via deposit form: {wallets}")
+                deposit_wallets = await _submit_deposit_form(
+                    page, base_url, output_dir, domain
+                )
+                if deposit_wallets:
+                    _merge_wallets(all_wallets, deposit_wallets)
+                    print(f"  [harvester] WALLETS via deposit form: {deposit_wallets}")
             except Exception as e:
-                print(f"  [harvester] Deposit form submission failed: {e}")
+                print(f"  [harvester] Deposit form failed: {e}")
 
         await browser.close()
 
     total = sum(len(v) for v in all_wallets.values())
-    print(f"  [harvester] Done — {total} wallets, logged_in={login_success}")
+    print(f"  [harvester] Done — {total} wallets, authenticated={login_success}")
 
-    # Blockchain analysis
+    # Phase 6: Blockchain
     blockchain_results = {}
     total_usd = 0.0
     if all_wallets:
-        print(f"  [harvester] Analyzing on blockchain...")
+        print(f"  [harvester] Tracing on blockchain...")
         try:
             from scripts.blockchain import analyze_wallet
             for currency, addresses in all_wallets.items():
@@ -671,7 +651,6 @@ def harvest_wallets_sync(domain: str, output_dir: str = "outputs") -> dict:
 
 
 if __name__ == "__main__":
-    import sys
-    domain = sys.argv[1] if len(sys.argv) > 1 else "stake2earn.app"
+    domain = sys.argv[1] if len(sys.argv) > 1 else "vevrecapital.net"
     result = harvest_wallets_sync(domain)
     print(json.dumps(result, indent=2, default=str))
