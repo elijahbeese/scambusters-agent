@@ -57,7 +57,7 @@ def _get_verification_link(username, sid_token, timeout=90):
                         headers=headers, timeout=15
                     )
                     if r2.status_code == 200:
-                        urls = re.findall(r'https?://[^\s"'<>]+(?:verif|confirm|activ|token|valid)[^\s"'<>]+', r2.text)
+                        urls = re.findall(r"https?://[^\s\"'<>]+(?:verif|confirm|activ|token|valid)[^\s\"'<>]+", r2.text)
                         if urls:
                             return urls[0].rstrip('"').rstrip("'").rstrip("\\")
         except Exception:
