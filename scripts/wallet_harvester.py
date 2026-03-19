@@ -23,6 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
@@ -509,8 +512,7 @@ async def _attempt_registration(page, base_url: str, identity: dict) -> bool:
             
             post_url = page.url
             post_content = await page.content()
-            has_error = any(kw in post_content.lower() for kw in
-                           ["wrong", "invalid", "error", "failed", "incorrect"])
+            has_error = "itts" in post_url.lower() or "/error" in post_url.lower()
             
             print(f"  [harvester] Registration at {path} → {post_url} error={has_error}")
 
