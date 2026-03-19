@@ -1,19 +1,12 @@
 """
-wallet_harvester.py — Headless browser wallet extraction
-Uses Playwright to:
-1. Create a fake account on HYIP scam sites
-2. Navigate to deposit/invest/payment pages
-3. Extract all cryptocurrency wallet addresses
-4. Screenshot evidence of the deposit page
-
-This automates the manual step from I4G curriculum Section 1:
-"Creating Fake Accounts on Cryptoscam Sites"
-
-OpSec notes:
-- Always run behind VPN
-- Uses randomized fake identity
-- Clears cookies/storage between runs
-- Takes screenshots as evidence
+wallet_harvester.py — Headless browser wallet extraction v3
+Fixed:
+- Login verification after registration
+- Fallback to direct login attempt
+- Wait for dashboard indicators before scanning deposit pages  
+- SMS/email verification detection and handling
+- Better deposit page detection (looks for actual wallet address elements)
+- Proper session cookie persistence
 """
 
 import os
@@ -36,15 +29,15 @@ WALLET_PATTERNS = {
     "BNB":        r"\b(bnb1[a-zA-Z0-9]{38})\b",
 }
 
-# Known false positive patterns — error messages, JS identifiers, etc.
 FALSE_POSITIVE_PATTERNS = [
-    r"^[A-Z][a-z]+[A-Z]",        # CamelCase = JS class/exception names
-    r"Exception$",                 # Error class names
+    r"^[A-Z][a-z]+[A-Z]",
+    r"Exception$",
     r"Error$",
     r"Handler$",
     r"Controller$",
     r"resuming",
-    r"^[a-z]+[A-Z][a-z]+[A-Z]",  # lowerCamelCase = JS variables
+    r"^[a-z]+[A-Z][a-z]+[A-Z]",
+    r"^[a-zA-Z]+\.[a-zA-Z]+$",  # domain-like strings
 ]
 
 DEPOSIT_PATHS = [
@@ -54,26 +47,53 @@ DEPOSIT_PATHS = [
     "/account/deposit", "/wallet/deposit",
     "/plans", "/packages", "/invest/plans",
     "/crypto/deposit", "/fund/deposit",
+    "/user/dashboard", "/dashboard", "/home",
+    "/user/home", "/member/deposit",
 ]
 
 REGISTER_PATHS = [
     "/register", "/signup", "/sign-up",
     "/user/register", "/account/register",
     "/auth/register", "/join", "/create-account",
+    "/en/register", "/app/register",
+]
+
+LOGIN_PATHS = [
+    "/login", "/signin", "/sign-in",
+    "/user/login", "/account/login",
+    "/auth/login", "/user/signin",
+    "/en/login", "/app/login",
+]
+
+# Indicators that we're logged in (on dashboard)
+LOGIN_SUCCESS_INDICATORS = [
+    "dashboard", "logout", "log out", "sign out", "signout",
+    "my account", "my profile", "deposit", "withdraw",
+    "balance", "portfolio", "investment",
+]
+
+# Indicators that registration/login failed
+LOGIN_FAIL_INDICATORS = [
+    "invalid", "incorrect", "wrong password", "not found",
+    "verification required", "verify your email", "confirm your email",
+    "activate your account",
 ]
 
 
 def generate_fake_identity() -> dict:
     first_names = ["James", "Michael", "Robert", "David", "John",
-                   "Sarah", "Emma", "Lisa", "Anna", "Maria"]
+                   "Sarah", "Emma", "Lisa", "Anna", "Maria",
+                   "Thomas", "William", "Richard", "Joseph", "Charles"]
     last_names  = ["Smith", "Johnson", "Williams", "Brown", "Jones",
-                   "Garcia", "Miller", "Davis", "Wilson", "Taylor"]
+                   "Garcia", "Miller", "Davis", "Wilson", "Taylor",
+                   "Anderson", "Thomas", "Jackson", "White", "Harris"]
     first = random.choice(first_names)
     last  = random.choice(last_names)
+    # Use temp-mail style addresses that actually receive mail
     username = f"{first.lower()}{last.lower()}{random.randint(100,999)}"
     email    = f"{username}@mailinator.com"
-    chars    = string.ascii_letters + string.digits + "!@#"
-    password = "".join(random.choices(chars, k=14))
+    chars    = string.ascii_letters + string.digits + "!@#$"
+    password = "".join(random.choices(chars, k=12)) + "1Aa!"  # meets most password requirements
     return {
         "first_name": first,
         "last_name":  last,
@@ -81,6 +101,7 @@ def generate_fake_identity() -> dict:
         "email":      email,
         "password":   password,
         "phone":      f"+1{random.randint(2000000000, 9999999999)}",
+        "referral":   "",
     }
 
 
@@ -90,13 +111,10 @@ def extract_wallets_from_text(text: str) -> dict:
         matches = re.findall(pattern, text)
         valid = []
         for addr in set(matches):
-            # Length check
             if len(addr) < 25:
                 continue
-            # ETH zero address
             if addr.startswith("0x" + "0" * 38):
                 continue
-            # Check against false positive patterns
             is_fp = False
             for fp in FALSE_POSITIVE_PATTERNS:
                 if re.search(fp, addr):
@@ -104,10 +122,8 @@ def extract_wallets_from_text(text: str) -> dict:
                     break
             if is_fp:
                 continue
-            # XRP: must contain numbers
             if currency == "XRP" and not any(c.isdigit() for c in addr):
                 continue
-            # LTC: must not be all letters
             if currency == "LTC" and addr.isalpha():
                 continue
             valid.append(addr)
@@ -125,19 +141,23 @@ def _merge_wallets(target: dict, source: dict):
                 target[currency].append(addr)
 
 
-async def _attempt_registration(page, identity: dict):
+async def _fill_form_fields(page, identity: dict):
+    """Fill registration/login form fields."""
     field_selectors = {
         "email": [
             'input[type="email"]', 'input[name="email"]',
             'input[name="user_email"]', 'input[placeholder*="email" i]',
+            'input[id*="email" i]',
         ],
         "password": [
             'input[type="password"]', 'input[name="password"]',
             'input[name="pass"]', 'input[placeholder*="password" i]',
+            'input[id*="password" i]',
         ],
         "username": [
             'input[name="username"]', 'input[name="user_name"]',
             'input[name="login"]', 'input[placeholder*="username" i]',
+            'input[id*="username" i]',
         ],
         "first_name": [
             'input[name="first_name"]', 'input[name="firstname"]',
@@ -157,6 +177,10 @@ async def _attempt_registration(page, identity: dict):
             'input[name="password2"]',
             'input[placeholder*="confirm" i]',
         ],
+        "referral": [
+            'input[name="referral"]', 'input[name="ref"]',
+            'input[name="referral_code"]', 'input[placeholder*="referral" i]',
+        ],
     }
 
     values = {
@@ -167,19 +191,22 @@ async def _attempt_registration(page, identity: dict):
         "last_name":        identity["last_name"],
         "phone":            identity["phone"],
         "confirm_password": identity["password"],
+        "referral":         identity["referral"],
     }
 
+    filled = []
     for field, selectors in field_selectors.items():
         for selector in selectors:
             try:
                 el = await page.query_selector(selector)
                 if el and await el.is_visible():
                     await el.fill(values[field])
+                    filled.append(field)
                     break
             except Exception:
                 continue
 
-    # Check terms checkboxes
+    # Check all checkboxes (ToS, etc)
     try:
         for cb in await page.query_selector_all('input[type="checkbox"]'):
             try:
@@ -190,43 +217,95 @@ async def _attempt_registration(page, identity: dict):
     except Exception:
         pass
 
-    # Submit
+    return filled
+
+
+async def _submit_form(page) -> bool:
+    """Submit form and return True if clicked."""
     for selector in [
         'button[type="submit"]', 'input[type="submit"]',
         'button:has-text("Register")', 'button:has-text("Sign Up")',
         'button:has-text("Create Account")', 'button:has-text("Join")',
-        'button:has-text("Submit")', '.register-btn',
+        'button:has-text("Login")', 'button:has-text("Sign In")',
+        'button:has-text("Submit")', '.register-btn', '.login-btn',
+        '#submit', '#login-btn', '#register-btn',
     ]:
         try:
             btn = await page.query_selector(selector)
             if btn and await btn.is_visible():
                 await btn.click()
-                await page.wait_for_timeout(3000)
-                break
+                return True
         except Exception:
             continue
+    return False
+
+
+async def _check_logged_in(page) -> bool:
+    """Check if current page indicates we're logged in."""
+    try:
+        content = await page.content()
+        content_lower = content.lower()
+        url = page.url.lower()
+
+        # Check URL for dashboard indicators
+        if any(kw in url for kw in ["dashboard", "home", "account", "member"]):
+            return True
+
+        # Check page content
+        hit_count = sum(1 for kw in LOGIN_SUCCESS_INDICATORS if kw in content_lower)
+        fail_count = sum(1 for kw in LOGIN_FAIL_INDICATORS if kw in content_lower)
+
+        return hit_count >= 2 and fail_count == 0
+    except Exception:
+        return False
+
+
+async def _attempt_login(page, base_url: str, identity: dict) -> bool:
+    """Try to log in with existing credentials."""
+    for path in LOGIN_PATHS:
+        try:
+            r = await page.goto(base_url + path,
+                                wait_until="domcontentloaded", timeout=15000)
+            if not r or r.status != 200:
+                continue
+
+            # Check if this is actually a login page
+            content = await page.content()
+            if 'password' not in content.lower():
+                continue
+
+            await _fill_form_fields(page, identity)
+            await _submit_form(page)
+            await page.wait_for_timeout(3000)
+
+            if await _check_logged_in(page):
+                print(f"  [harvester] Login successful via {path}")
+                return True
+
+        except Exception:
+            continue
+
+    return False
 
 
 async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        return {
-            "error": "Playwright not installed. Run: pip install playwright && playwright install chromium",
-            "wallets": {},
-        }
+        return {"error": "Playwright not installed", "wallets": {}}
 
     base_url  = f"https://{domain}"
     identity  = generate_fake_identity()
     Path(output_dir).mkdir(exist_ok=True)
 
-    all_wallets           = {}
-    screenshots           = []
-    pages_visited         = []
-    registration_success  = False
+    all_wallets          = {}
+    screenshots          = []
+    pages_visited        = []
+    registration_success = False
+    login_success        = False
 
     print(f"\n  [harvester] Starting headless browser for {domain}")
-    print(f"  [harvester] Fake identity: {identity['email']}")
+    print(f"  [harvester] Identity: {identity['email']} / {identity['password'][:4]}****")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -241,7 +320,7 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
         )
         page = await context.new_page()
 
-        # Step 1: Homepage
+        # ── Step 1: Homepage ──────────────────────────────────────────────────
         try:
             await page.goto(base_url, wait_until="networkidle", timeout=30000)
             content = await page.content()
@@ -251,31 +330,69 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
             await page.screenshot(path=ss, full_page=True)
             screenshots.append(ss)
             print(f"  [harvester] Homepage loaded")
+
+            # Check if already logged in (cached session)
+            if await _check_logged_in(page):
+                login_success = True
+                print(f"  [harvester] Already authenticated")
         except Exception as e:
             print(f"  [harvester] Homepage failed: {e}")
 
-        # Step 2: Find registration page and sign up
-        for path in REGISTER_PATHS:
-            try:
-                r = await page.goto(base_url + path,
-                                    wait_until="domcontentloaded", timeout=15000)
-                if r and r.status == 200:
-                    print(f"  [harvester] Found registration: {path}")
-                    await _attempt_registration(page, identity)
-                    registration_success = True
+        # ── Step 2: Register ──────────────────────────────────────────────────
+        if not login_success:
+            for path in REGISTER_PATHS:
+                try:
+                    r = await page.goto(base_url + path,
+                                        wait_until="domcontentloaded", timeout=15000)
+                    if not r or r.status != 200:
+                        continue
 
                     content = await page.content()
-                    _merge_wallets(all_wallets, extract_wallets_from_text(content))
+                    if 'password' not in content.lower():
+                        continue
 
+                    print(f"  [harvester] Registering at {path}")
+                    filled = await _fill_form_fields(page, identity)
+
+                    if not filled:
+                        continue
+
+                    await _submit_form(page)
+                    await page.wait_for_timeout(4000)
+
+                    # Take screenshot to see what happened
                     ss = f"{output_dir}/{domain.replace('.','_')}_post_register.png"
                     await page.screenshot(path=ss, full_page=True)
                     screenshots.append(ss)
-                    break
-            except Exception:
-                continue
+                    registration_success = True
 
-        # Step 3: Hit all deposit paths
-        print(f"  [harvester] Scanning {len(DEPOSIT_PATHS)} deposit paths...")
+                    # Check if we got logged in automatically after registration
+                    if await _check_logged_in(page):
+                        login_success = True
+                        print(f"  [harvester] Auto-logged in after registration")
+                        break
+
+                    # Check for verification requirement
+                    content = await page.content()
+                    content_lower = content.lower()
+                    if any(kw in content_lower for kw in
+                           ["verify", "verification", "confirm your email", "activate"]):
+                        print(f"  [harvester] Email verification required — trying direct login")
+                        break
+
+                    break
+                except Exception:
+                    continue
+
+        # ── Step 3: Try login if not authenticated ────────────────────────────
+        if not login_success:
+            login_success = await _attempt_login(page, base_url, identity)
+            if not login_success:
+                print(f"  [harvester] Could not authenticate — scanning public pages only")
+
+        # ── Step 4: Scan deposit pages (authenticated or not) ─────────────────
+        print(f"  [harvester] Scanning {len(DEPOSIT_PATHS)} paths (authenticated={login_success})...")
+
         for path in DEPOSIT_PATHS:
             try:
                 r = await page.goto(base_url + path,
@@ -283,9 +400,33 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
                 if not r or r.status in (404, 403, 500):
                     continue
 
-                await page.wait_for_timeout(2000)
+                # Wait for dynamic content to load
+                await page.wait_for_timeout(2500)
+
+                # Also wait for any wallet address elements to appear
+                try:
+                    await page.wait_for_selector(
+                        '[class*="wallet"], [class*="address"], [id*="wallet"], [id*="address"]',
+                        timeout=3000
+                    )
+                except Exception:
+                    pass
+
                 content = await page.content()
                 wallets = extract_wallets_from_text(content)
+
+                # Also check for wallet addresses in input fields (copy-to-clipboard pattern)
+                try:
+                    inputs = await page.query_selector_all(
+                        'input[readonly], input[disabled], input[class*="wallet"], input[class*="address"]'
+                    )
+                    for inp in inputs:
+                        val = await inp.get_attribute("value") or ""
+                        if val:
+                            w = extract_wallets_from_text(val)
+                            _merge_wallets(wallets, w)
+                except Exception:
+                    pass
 
                 if wallets:
                     _merge_wallets(all_wallets, wallets)
@@ -295,12 +436,15 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
                     await page.screenshot(path=ss, full_page=True)
                     screenshots.append(ss)
 
-                # Flag QR codes for manual follow-up
+                # QR codes
                 qr = await page.query_selector_all(
-                    "img[src*='qr' i], img[alt*='qr' i], img[alt*='wallet' i]"
+                    "img[src*='qr' i], img[alt*='qr' i], canvas[class*='qr' i]"
                 )
                 if qr:
-                    print(f"  [harvester] QR code on {path} — manual extraction needed")
+                    print(f"  [harvester] QR code detected on {path}")
+                    ss = f"{output_dir}/{domain.replace('.','_')}{path.replace('/','_')}_qr.png"
+                    await page.screenshot(path=ss, full_page=True)
+                    screenshots.append(ss)
 
             except Exception:
                 continue
@@ -308,13 +452,13 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
         await browser.close()
 
     total = sum(len(v) for v in all_wallets.values())
-    print(f"  [harvester] Done — {total} wallets found")
+    print(f"  [harvester] Done — {total} wallets, logged_in={login_success}")
 
-    # Auto-analyze wallets on blockchain
+    # Blockchain analysis
     blockchain_results = {}
     total_usd = 0.0
     if all_wallets:
-        print(f"  [harvester] Analyzing wallets on blockchain...")
+        print(f"  [harvester] Analyzing on blockchain...")
         try:
             from scripts.blockchain import analyze_wallet
             for currency, addresses in all_wallets.items():
@@ -325,12 +469,12 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
                     usd = result.get("total_received_usd", 0) or 0
                     total_usd += usd
                     if usd > 0:
-                        print(f"  [harvester] {currency} {addr[:16]}... → ${usd:,.2f} USD")
+                        print(f"  [harvester] {currency} {addr[:16]}... → ${usd:,.2f}")
         except Exception as e:
-            print(f"  [harvester] Blockchain analysis error: {e}")
+            print(f"  [harvester] Blockchain error: {e}")
 
     if total_usd > 0:
-        print(f"  [harvester] TOTAL VICTIM LOSSES: ${total_usd:,.2f} USD")
+        print(f"  [harvester] TOTAL VICTIM LOSSES: ${total_usd:,.2f}")
 
     return {
         "wallets":                all_wallets,
@@ -340,13 +484,13 @@ async def harvest_wallets(domain: str, output_dir: str = "outputs") -> dict:
         "pages_visited":          pages_visited,
         "screenshots":            screenshots,
         "registration_attempted": registration_success,
+        "login_success":          login_success,
         "fake_email":             identity["email"],
-        "timestamp":              datetime.utcnow().isoformat(),
+        "timestamp":              datetime.now().isoformat(),
     }
 
 
 def harvest_wallets_sync(domain: str, output_dir: str = "outputs") -> dict:
-    """Synchronous wrapper for use in agent.py."""
     return asyncio.run(harvest_wallets(domain, output_dir))
 
 

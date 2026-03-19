@@ -86,109 +86,54 @@ def is_likely_scam(domain: str) -> bool:
 
 # ── Source 1: HYIP Monitor Sites ─────────────────────────────────────────────
 
-def scrape_hyipexplorer() -> list:
-    """Scrape HYIPExplorer for new listings."""
+def _scrape_hyip_monitor(name: str, url: str) -> list:
+    """Generic HYIP monitor scraper."""
     domains = []
     try:
-        r = requests.get(
-            "https://hyipexplorer.com/",
-            headers=HEADERS, timeout=20
-        )
+        r = requests.get(url, headers=HEADERS, timeout=20, verify=False)
         soup = BeautifulSoup(r.text, "lxml")
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if "hyipexplorer.com" not in href and href.startswith("http"):
-                d = clean_domain(href)
-                if d and d not in domains:
-                    domains.append(d)
-        print(f"  [discover] HYIPExplorer: {len(domains)} domains")
+            if not any(skip in href for skip in [name.lower(), "javascript", "#", "mailto"]):
+                if href.startswith("http"):
+                    d = clean_domain(href)
+                    if d and d not in domains:
+                        domains.append(d)
+        print(f"  [discover] {name}: {len(domains)} domains")
     except Exception as e:
-        print(f"  [discover] HYIPExplorer failed: {e}")
+        print(f"  [discover] {name} failed: {e}")
     return domains
 
 
-def scrape_allhyipmonitors() -> list:
-    """Scrape AllHYIPMonitors — active HYIP listing site."""
-    domains = []
-    try:
-        r = requests.get(
-            "https://www.allhyipmonitors.com/",
-            headers=HEADERS, timeout=20
-        )
-        soup = BeautifulSoup(r.text, "lxml")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "allhyipmonitors.com" not in href and href.startswith("http"):
-                d = clean_domain(href)
-                if d and d not in domains:
-                    domains.append(d)
-        print(f"  [discover] AllHYIPMonitors: {len(domains)} domains")
-    except Exception as e:
-        print(f"  [discover] AllHYIPMonitors failed: {e}")
-    return domains
+def scrape_tophyip() -> list:
+    return _scrape_hyip_monitor("tophyip", "https://www.tophyip.biz/")
 
+def scrape_payinghyip() -> list:
+    return _scrape_hyip_monitor("payinghyip", "http://www.payinghyiponline.com/")
 
-def scrape_hyipmon() -> list:
-    """Scrape HYIPMon monitor."""
-    domains = []
-    try:
-        r = requests.get(
-            "https://hyipmon.com/",
-            headers=HEADERS, timeout=20
-        )
-        soup = BeautifulSoup(r.text, "lxml")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "hyipmon.com" not in href and href.startswith("http"):
-                d = clean_domain(href)
-                if d and d not in domains:
-                    domains.append(d)
-        print(f"  [discover] HYIPMon: {len(domains)} domains")
-    except Exception as e:
-        print(f"  [discover] HYIPMon failed: {e}")
-    return domains
+def scrape_investtracing() -> list:
+    return _scrape_hyip_monitor("investtracing", "https://invest-tracing.com/index.php")
 
+def scrape_bestemoneys() -> list:
+    return _scrape_hyip_monitor("bestemoneys", "https://bestemoneys.com/hyips_1.html")
 
-def scrape_investfilter() -> list:
-    """Scrape InvestFilter — crypto investment monitor."""
-    domains = []
-    try:
-        r = requests.get(
-            "https://investfilter.com/",
-            headers=HEADERS, timeout=20
-        )
-        soup = BeautifulSoup(r.text, "lxml")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "investfilter.com" not in href and href.startswith("http"):
-                d = clean_domain(href)
-                if d and d not in domains:
-                    domains.append(d)
-        print(f"  [discover] InvestFilter: {len(domains)} domains")
-    except Exception as e:
-        print(f"  [discover] InvestFilter failed: {e}")
-    return domains
+def scrape_phyip() -> list:
+    return _scrape_hyip_monitor("phyip", "https://phyip.com/")
 
+def scrape_hyipbiz() -> list:
+    return _scrape_hyip_monitor("hyipbiz", "https://www.hyip.biz/")
 
-def scrape_earnmanual() -> list:
-    """Scrape EarnManual HYIP directory."""
-    domains = []
-    try:
-        r = requests.get(
-            "https://earnmanual.com/",
-            headers=HEADERS, timeout=20
-        )
-        soup = BeautifulSoup(r.text, "lxml")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "earnmanual.com" not in href and href.startswith("http"):
-                d = clean_domain(href)
-                if d and d not in domains:
-                    domains.append(d)
-        print(f"  [discover] EarnManual: {len(domains)} domains")
-    except Exception as e:
-        print(f"  [discover] EarnManual failed: {e}")
-    return domains
+def scrape_sqmonitor() -> list:
+    return _scrape_hyip_monitor("sqmonitor", "https://www.sqmonitor.com/")
+
+def scrape_hyipbanker() -> list:
+    return _scrape_hyip_monitor("hyipbanker", "https://hyipbanker.com/")
+
+def scrape_hothyips() -> list:
+    return _scrape_hyip_monitor("hothyips", "https://www.hothyips.com/")
+
+def scrape_hyipmonitors24() -> list:
+    return _scrape_hyip_monitor("hyipmonitors24", "https://hyipmonitors24.net/")
 
 
 # ── Source 2: URLScan Cryptoscam Tag ─────────────────────────────────────────
@@ -388,16 +333,21 @@ def discover_scam_domains(max_domains: int = 200,
     print("\n[discover] Starting autonomous scam discovery...")
 
     sources = [
-        ("HYIP Explorer",      scrape_hyipexplorer),
-        ("AllHYIPMonitors",    scrape_allhyipmonitors),
-        ("HYIPMon",            scrape_hyipmon),
-        ("InvestFilter",       scrape_investfilter),
-        ("EarnManual",         scrape_earnmanual),
-        ("URLScan",            scrape_urlscan_cryptoscam),
-        ("CryptoScamDB",       scrape_cryptoscamdb),
-        ("OpenPhish",          scrape_openphish),
-        ("PhishTank",          scrape_phishtank),
-        ("Telegram",           scrape_telegram_channels),
+        ("TopHYIP",         scrape_tophyip),
+        ("PayingHYIP",      scrape_payinghyip),
+        ("InvestTracing",   scrape_investtracing),
+        ("BestEMoneys",     scrape_bestemoneys),
+        ("pHYIP",           scrape_phyip),
+        ("HYIP.biz",        scrape_hyipbiz),
+        ("SQMonitor",       scrape_sqmonitor),
+        ("HYIPBanker",      scrape_hyipbanker),
+        ("HotHYIPs",        scrape_hothyips),
+        ("HYIPMonitors24",  scrape_hyipmonitors24),
+        ("URLScan",         scrape_urlscan_cryptoscam),
+        ("CryptoScamDB",    scrape_cryptoscamdb),
+        ("OpenPhish",       scrape_openphish),
+        ("PhishTank",       scrape_phishtank),
+        ("Telegram",        scrape_telegram_channels),
     ]
 
     for name, func in sources:
